@@ -82,7 +82,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("inactivos")
-    .setDescription("Muestra miembros que ya están cerca o pasan el límite de inactividad."),
+    .setDescription("Muestra miembros cerca o pasados del límite de inactividad."),
 
   new SlashCommandBuilder()
     .setName("actividad")
@@ -126,12 +126,14 @@ client.once("clientReady", async () => {
   try {
     const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
-    await rest.put(
-      Routes.applicationCommands(client.user.id),
-      { body: commands }
-    );
+    for (const guild of client.guilds.cache.values()) {
+      await rest.put(
+        Routes.applicationGuildCommands(client.user.id, guild.id),
+        { body: commands }
+      );
 
-    console.log("Comandos slash registrados correctamente.");
+      console.log(`Comandos registrados en: ${guild.name}`);
+    }
   } catch (error) {
     console.log("Error registrando comandos:", error);
   }
@@ -355,6 +357,21 @@ async function revisarInactivos() {
 
       if (fechaBase <= limiteKick) {
         try {
+          await member.send({
+            content:
+              `**Has sido expulsado de la CIA**\n\n` +
+              `Has sido expulsado de la CIA por no completar tu horario laboral, ` +
+              `por eso los gorilas de la puerta te sacaron a patadas.`
+          }).catch(() => {});
+
+          if (process.env.IMAGEN_EXPULSION) {
+            await member.send({
+              files: [process.env.IMAGEN_EXPULSION]
+            }).catch(() => {});
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
           await member.kick(`Inactividad de más de ${DIAS_INACTIVO} días`);
 
           delete db[guild.id].actividad[member.id];
