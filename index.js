@@ -28,12 +28,14 @@ function asegurarServidor(guildId) {
     db[guildId] = {
       actividad: {},
       avisados: {},
-      logChannelId: null
+      logChannelId: null,
+      excepciones: []
     };
   }
 
   if (!db[guildId].actividad) db[guildId].actividad = {};
   if (!db[guildId].avisados) db[guildId].avisados = {};
+  if (!db[guildId].excepciones) db[guildId].excepciones = [];
 }
 
 function tiempoTexto(ms) {
@@ -84,7 +86,38 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("actividad")
-    .setDescription("Muestra cuánto tiempo lleva cada miembro sin escribir.")
+    .setDescription("Muestra cuánto tiempo lleva cada miembro sin escribir."),
+
+  new SlashCommandBuilder()
+    .setName("excepcion")
+    .setDescription("Agrega o quita usuarios de la lista de excepciones.")
+    .addSubcommand(sub =>
+      sub
+        .setName("agregar")
+        .setDescription("Agrega un usuario a excepciones.")
+        .addUserOption(option =>
+          option
+            .setName("usuario")
+            .setDescription("Usuario")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("quitar")
+        .setDescription("Quita un usuario de excepciones.")
+        .addUserOption(option =>
+          option
+            .setName("usuario")
+            .setDescription("Usuario")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("lista")
+        .setDescription("Muestra la lista de excepciones.")
+    )
 ].map(command => command.toJSON());
 
 client.once("clientReady", async () => {
@@ -144,6 +177,63 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
+  if (interaction.commandName === "excepcion") {
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return interaction.reply({
+        content: "No tienes permiso para usar este comando.",
+        ephemeral: true
+      });
+    }
+
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === "agregar") {
+      const usuario = interaction.options.getUser("usuario");
+
+      if (!db[interaction.guild.id].excepciones.includes(usuario.id)) {
+        db[interaction.guild.id].excepciones.push(usuario.id);
+        guardar();
+      }
+
+      return interaction.reply({
+        content: `${usuario} fue agregado a excepciones. No será expulsado por inactividad.`,
+        ephemeral: true
+      });
+    }
+
+    if (sub === "quitar") {
+      const usuario = interaction.options.getUser("usuario");
+
+      db[interaction.guild.id].excepciones =
+        db[interaction.guild.id].excepciones.filter(id => id !== usuario.id);
+
+      guardar();
+
+      return interaction.reply({
+        content: `${usuario} fue quitado de excepciones.`,
+        ephemeral: true
+      });
+    }
+
+    if (sub === "lista") {
+      const excepciones = db[interaction.guild.id].excepciones;
+
+      if (!excepciones.length) {
+        return interaction.reply({
+          content: "No hay usuarios en excepciones.",
+          ephemeral: true
+        });
+      }
+
+      const texto = excepciones.map(id => `<@${id}>`).join("\n");
+
+      return interaction.reply({
+        content: `Usuarios en excepciones:\n${texto}`,
+        ephemeral: true
+      });
+    }
+  }
+
   if (interaction.commandName === "inactivos") {
     await interaction.deferReply({ ephemeral: true });
 
@@ -155,6 +245,7 @@ client.on("interactionCreate", async (interaction) => {
 
     miembros.forEach(member => {
       if (member.user.bot) return;
+      if (db[interaction.guild.id].excepciones.includes(member.id)) return;
 
       const ultima = db[interaction.guild.id].actividad[member.id] || member.joinedTimestamp;
       if (!ultima) return;
@@ -164,16 +255,13 @@ client.on("interactionCreate", async (interaction) => {
       if (inactivoMs >= limiteAviso) {
         lista.push({
           nombre: member.user.tag,
+          inactivoMs,
           tiempo: tiempoTexto(inactivoMs)
         });
       }
     });
 
-    lista.sort((a, b) => {
-      const diasA = Number(a.tiempo.split(" ")[0]) || 0;
-      const diasB = Number(b.tiempo.split(" ")[0]) || 0;
-      return diasB - diasA;
-    });
+    lista.sort((a, b) => b.inactivoMs - a.inactivoMs);
 
     if (lista.length === 0) {
       return interaction.editReply("No hay miembros cerca del límite de inactividad.");
@@ -211,7 +299,8 @@ client.on("interactionCreate", async (interaction) => {
       lista.push({
         nombre: member.user.tag,
         inactivoMs,
-        texto: tiempoTexto(inactivoMs)
+        texto: tiempoTexto(inactivoMs),
+        excepcion: db[interaction.guild.id].excepciones.includes(member.id)
       });
     });
 
@@ -219,7 +308,10 @@ client.on("interactionCreate", async (interaction) => {
 
     const texto = lista
       .slice(0, 30)
-      .map((u, i) => `${i + 1}. **${u.nombre}** — ${u.texto} sin escribir`)
+      .map((u, i) => {
+        const marca = u.excepcion ? " 🛡️ EXCEPCIÓN" : "";
+        return `${i + 1}. **${u.nombre}** — ${u.texto} sin escribir${marca}`;
+      })
       .join("\n");
 
     const embed = new EmbedBuilder()
@@ -252,6 +344,7 @@ async function revisarInactivos() {
 
     for (const member of miembros.values()) {
       if (member.user.bot) continue;
+      if (db[guild.id].excepciones.includes(member.id)) continue;
       if (member.permissions.has(PermissionsBitField.Flags.Administrator)) continue;
       if (!member.kickable) continue;
 
@@ -285,7 +378,9 @@ async function revisarInactivos() {
         db[guild.id].avisados[member.id] = Date.now();
         guardar();
 
-        const diasRestantes = DIAS_INACTIVO - Math.floor((ahora - fechaBase) / (1000 * 60 * 60 * 24));
+        const diasRestantes =
+          DIAS_INACTIVO -
+          Math.floor((ahora - fechaBase) / (1000 * 60 * 60 * 24));
 
         await member.send(
           `Hola, este es un aviso del servidor **${guild.name}**. Estás cerca de ser expulsado por inactividad. Tienes aproximadamente **${diasRestantes} días** para escribir en el servidor y renovar tu actividad.`
